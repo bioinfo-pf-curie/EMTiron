@@ -1,0 +1,229 @@
+---
+title: "RNA-seq - EMT-Iron"
+author: "Nicolas Servant"
+date: "01th Novembre 2018"
+output: 
+  html_document:
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE, message=FALSE, warning=FALSE)
+```
+
+```{r loaddata}
+rm(list=ls())
+require(GenomicRanges)
+require(rtracklayer)
+require(ggplot2)
+require(reshape2)
+require(DESeq2)
+require(gridExtra)
+require(pheatmap)
+require(RColorBrewer)
+require(genefilter)
+require(ggrepel)
+require(limma)
+require(edgeR)
+require(DT)
+
+## PATH and SETTINGS
+inPath <- "./"
+outPath <- "./"
+splan <- read.csv(file.path(inPath, "data/SAMPLE_PLAN"))
+
+## FUNCTIONS
+gexprs <- function(x, group, yl="Expression", main=""){
+  d <- melt(x)
+  d$group <- group
+  ggplot(d, aes(x=variable, y=value, fill=group)) + geom_bar(stat = 'identity') + theme_classic() + ggtitle(main) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ylab(yl) +
+    xlab("")
+}
+
+
+LimmaVolcano <- function(res, main="", fct=1.5, pt=0.05){
+  res$sign <- 0
+  res$sign[which(res$adj.P.Val < pt & abs(res$logFC) > fct)] <- 1
+
+  p <- ggplot(data=res, aes(x=logFC, y=-log10(adj.P.Val), colour=as.factor(sign))) +  geom_point(alpha=0.4, size=2) + scale_color_manual(name="", values=c("1"="red", "0"="black")) + ggtitle(paste0("Volcano Plot - Limma ", main)) + theme(legend.position = "none") +
+xlab("log2 fold change") + ylab("-log10 adj pvalue") + geom_vline(xintercept=c(-fct, fct), linetype=2) + geom_hline(yintercept=-log10(pt), linetype=2)
+  p
+}
+
+
+```
+
+-------------------------------------------
+
+### Project and Design
+
+Sequencing has been performed using Illumina paired-end 100nt approach. The goal of the project is to compare 'untreated' and 'EGF' samples.   
+
+```{r splan}
+datatable(splan, colnames=c('IDs','Type', 'Replicate'), rownames = FALSE, escape = FALSE, filter = 'top', caption = 'Experimental design')
+```
+
+### Quality Control and Data processing
+
+Sequencing reads were aligned on the Human reference genome (hg38) using the STAR mapper. Protein-coding genes from the Gencode annotation have been used to generate the raw count table.   
+
+The raw counts table can be downloaded from GEO (GSE121663).
+
+Additional quality controls report a very high sequencing quality, a high fraction of mapped reads (>95% of uniquely mapped reads), and a high enrichment in exonic reads (>98%).  
+
+```{r tablecounts}
+## How many counts per samples
+d.counts <- read.csv(file.path(inPath, "data/tablecounts_raw.csv.gz"), header=TRUE, row.names=1)
+d.counts <- d.counts[,splan$id]
+colnames(d.counts) <- splan[match(splan$id, colnames(d.counts)), "sname"]
+rownames(splan) <- splan$sname
+
+ggplot(data.frame(x=colnames(d.counts), cs=colSums(d.counts)), aes(x=x, y=as.numeric(cs))) + geom_bar(stat="identity") + xlab("") + theme_classic() + ylab("Read counts") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+## remove all zeros
+d.counts <- d.counts[which(rowSums(d.counts)>0),]
+```
+
+-------------------------------------------
+
+## Exploratory analysis
+
+Raw counts have been normalized using the *rlog* method in order to stabilize the variance and apply dimension reduction methods.  
+
+```{r normalization}
+dds <- DESeqDataSetFromMatrix(countData=d.counts, 
+                              DataFrame(type=splan$type, 
+                                        replicate=splan$replicate), 
+                              design=~ type)
+dds <- estimateSizeFactors(dds)
+rld <- rlog(dds, blind=TRUE)
+```
+
+
+#### **Principal Component Analysis**
+
+We first run a Principal Component Analysis (PCA) on the most 1000 variable genes.  
+Briefly, the goal of such technic is to reduce the data dimension, from *n* gene dimensions to a few 'principal component' (PC) that maximize the variability in the data set without any a-priori knowledge. PCs are ordered according to the proportion of variance they explain.
+
+```{r pc1, fig.width=10}
+d.rld <- assay(rld)
+var_genes <- rowVars(d.rld)
+select_var <- order(var_genes, decreasing=TRUE)[1:1000]
+
+pca <- prcomp(t(d.rld[select_var,]))
+df <- as.data.frame(pca$x)
+df$type <- as.factor(splan[rownames(df),"type"])
+df$replicate <- as.factor(splan[rownames(df),"replicate"])
+df$name <- splan[rownames(df),"id"]
+percentVar <- round(pca$sdev^2/sum(pca$sdev^2)*100)
+
+ggplot(df) + geom_point(aes(PC1, PC2), size=5, color="grey") +
+  geom_label_repel(aes(PC1, PC2, fill=type, label=name), fontface='bold', color='white',
+      segment.color='grey50', box.padding = unit(0.35, "lines"), point.padding = unit(0.5, "lines")) +
+          labs(title="", x=paste0("PC1: ",percentVar[1],"% variance"), 
+                y=paste0("PC2: ",percentVar[2],"% variance")) +
+              theme_classic(base_size = 16) + theme(legend.title=element_blank())
+
+```
+
+As expected, the first component (PC1) is driven by the *EGF* effect (PC1 - 98% of variance).
+
+#### **Hierarchical CLustering of samples**
+
+Another way to look at samples similarity without any a priori knowledge is to perform a hierarchical clustering. Note that here, compared to the PCA, we used all genes in the distance calculation (Euclidean distance, Ward linkage).
+
+```{r clustering}
+sampleDists <- dist(t(assay(rld)))
+cl <- hclust(sampleDists, "ward.D2")
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- colnames(rld)
+colnames(sampleDistMatrix) <- colnames(rld)
+annot <- splan[,c("type", "replicate")]
+
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         clustering_method="ward.D2",
+         annotation_col=annot)
+```
+
+-------------------------------------------
+
+## Differential Analysis
+
+#### **Genes filtering**
+
+Note that in the context of differential analysis, we usually restrict the analysis to 'expressed' genes.
+The expressed genes are those with a TPM (transcripts per million) normalized counts >= 1 in at least one sample.
+
+```{r filter}
+N <- nrow(d.counts)
+## Expressed genes
+d.tpm <- read.csv(file.path(inPath, "data/tablecounts_tpm.csv.gz"), header=TRUE, row.names=1)
+d.tpm <- d.tpm[,as.vector(splan$id)]
+colnames(d.tpm) <- as.vector(splan$sname)
+isexpr <- names(which(apply(d.tpm[,colnames(d.counts)], 1, function(x){length(which(x>=1))})>=1))
+d.counts.f <- d.counts[isexpr,]
+d.tpm.f <- d.tpm[isexpr,]
+Nf <- nrow(d.counts.f)
+```
+
+In summary, starting from `r N` genes, we are now working with `r Nf` expressed genes.
+
+#### **Untreated vs EGF comparison**
+
+In order to perform the differential analysis, we design a linear model as follow: 
+
+Y ~it~ = mu ~i~ + T ~t~ + E ~it~  
+
+where T is the *type* effect (T={untreated, EGF}).
+Expressed raw count have been normalized using the TMM method from the edgeR package. Differential analysis has been performed with the limma/voom R package. All raw p-values were corrected for multiple testing using the Benjamini-Hochberg (BH) method.
+
+
+```{r limma}
+y <- DGEList(counts=d.counts.f, genes=rownames(d.counts.f))
+y <- calcNormFactors(y, method="TMM")
+design <- model.matrix(~ 0 + type, data=splan)
+v <- voom(y, design, plot=FALSE)
+fit <- lmFit(v, design)
+
+contrast <-makeContrasts(typeEGF-typeuntreated, levels=design)
+fit2 <- contrasts.fit(fit, contrast)
+fit2 <- eBayes(fit2)
+res <- topTable(fit2, number=nrow(d.counts.f), adjust.method="BH")
+res <- res[order(res$adj.P.Val),]
+
+hist(res$P.Value, col="gray50", border="white", main="Pvalues histogram")
+nsign <- length(which(res$adj.P.Val < 0.05))
+nsignfc <- length(which(res$adj.P.Val < 0.05 & abs(res$logFC) > 1))
+
+## save DEG
+write.csv(res, file.path(outPath, "DEG_untreated_vs_EGF_wo-release.csv"), 
+          row.names = FALSE, quote = FALSE)
+
+```
+
+
+`r nsign` DEG were found significant between release and EGF (FDR<5%).
+Among them `r nsignfc` are significant with a FC > 1.
+
+```{r volcano2}
+## VolcanoPlot
+LimmaVolcano(res, fct=1, pt=0.05, main=" - Untreated vs EGF")
+```
+
+#### **Zooming on a few genes of interest**
+
+As a control, let's focus on a few driver genes ...
+
+```{r genevar, eval=TRUE}
+res.fc <- res[order(res$logFC, decreasing = TRUE),]
+gexprs(d.tpm[grep("VIM$",rownames(d.tpm)),], group=splan[colnames(d.tpm),"type"], main="VIM")
+gexprs(d.tpm[grep("CD109",rownames(d.tpm)),], group=splan[colnames(d.tpm),"type"], main="CD109")
+gexprs(d.tpm[grep("CD44",rownames(d.tpm)),], group=splan[colnames(d.tpm),"type"], main="CD44")
+```
+
