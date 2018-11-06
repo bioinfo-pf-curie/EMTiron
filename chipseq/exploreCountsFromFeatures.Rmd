@@ -1,0 +1,178 @@
+---
+title: "ChIP-seq - EMT-Iron"
+author: "Nicolas Servant"
+date: "01th Novembre 2018"
+output: 
+  html_document:
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_float: true
+---
+
+## ChIP-seq count table
+
+The goal of this script is to compare ChIP-seq counts at a feature level.
+Features can be genes, promoters, etc.
+Counts per features were extracted using the FeatureCounts tools, the bam files, and the gene annotation from GENCODE (Human hg38)
+
+```
+featureCounts -a gencode.v26.annotation_gene.saf -F SAF -o allchip_counts_genes_test.csv \
+-T 4 -s 0 -O  ${BAM_FILE} 2> featureCounts.log
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE, message=FALSE, warning=FALSE)
+```
+
+```{r init}
+rm(list=ls())
+
+##
+## The goal of this script is to make simple scatter plot of ChIP-seq counts per feature
+## Feature can be genes, promoters, etc.
+## Counts per features are generated with the script makeFeatureCounts.sh
+##
+## /bioinfo/local/build/Centos/R/R-3.5.0/bin/R
+
+library(edgeR)
+library(ggplot2)
+library(reshape2)
+require(ggrepel)
+
+######################################
+## Functions
+######################################
+
+compareFC <- function(x, x.annot=NULL, nmax=20, group=c("untreated", "EGF")){
+
+    if (length(grep(group[1], colnames(x)))>1){
+        a <- rowMeans(x[,grep(group[1], colnames(x))])
+    }else {
+        a <- x[,grep(group[1], colnames(x))]
+    }
+    if (length(grep(group[2], colnames(x)))>1){
+        b <- rowMeans(x[,grep(group[2], colnames(x))])
+    }else {
+        b <- x[,grep(group[2], colnames(x))]
+    }
+    
+    xx <- cbind(a,b)
+    colnames(xx) <- group
+    
+    fc <- log2(1+xx[,1]) - log2(1+xx[,2])
+    fc <- fc[order(abs(fc), decreasing=TRUE)]
+    
+    df <- as.data.frame(xx)
+    colnames(df) <- c("S1","S2")
+    df.lab <- df
+    df.lab$name <- rownames(df)
+    df.lab <- df.lab[which(df.lab$name %in% names(fc[1:nmax])), ]
+
+    p <- ggplot(df, aes(x=log2(1+S1), y=log2(1+S2))) + geom_point(color="gray50") + theme_classic() +
+        xlab(colnames(xx)[1]) + ylab(colnames(xx)[2]) + geom_abline(slope=1, linetype = "dashed")+
+        geom_label_repel(data=df.lab, aes(x=log2(1+S1), y=log2(1+S2), label=name), fontface='bold', 
+                         segment.color='grey50', box.padding = unit(0.35, "lines"), 
+                         point.padding = unit(0.5, "lines"))
+    print(p)
+    if (!is.null(x.annot)){
+        res <- cbind(x.annot[match(names(fc), x.annot$Geneid),],
+                     round(x[names(fc),],3), round(fc,3))
+        colnames(res) <- c(colnames(x.annot), colnames(x), "LogFC")
+    }else{
+        res <- cbind(round(x[names(fc),],3), round(fc,3))
+        colnames(res) <- c(colnames(x), "LogFC")
+    }
+    return(res)
+}
+
+LimmaVolcano <- function(res, main="", fct=1.5, pt=0.05){
+    ggplot(data=res, aes(x=logFC, y=-log10(adj.P.Val), colour=as.factor(sign))) + 
+    geom_point(alpha=0.4, size=2) + theme_minimal() + 
+    ggtitle(paste0("Volcano Plot - Limma ", main)) +
+    theme(legend.position = "none") + xlim(c(-10, 10)) + ylim(c(0, 15)) +
+    xlab("log2 fold change") + ylab("-log10 adj pvalue") + 
+    geom_vline(xintercept=c(-fct, fct), linetype=2) + geom_hline(yintercept=-log10(pt), linetype=2)
+}
+```
+
+```{r loaddata}
+
+## Loading Sample plan
+sample.plan <- "./data/SAMPLE_PLAN"
+splan <- read.csv(sample.plan, header=FALSE)
+rownames(splan) <- sapply(strsplit(sapply(as.vector(splan[,1]), basename), "\\."), "[", 1)
+colnames(splan) <- c("chip","input","id")
+splan$Mark <- sapply(strsplit(as.character(splan[,3]), "_"), function(x){paste0(x[-length(x)], collapse="_")})
+splan$Group <- sapply(strsplit(as.character(splan[,3]), "_"), function(x){x[length(x)]})
+splan$Group <- gsub("-[0123]","", splan$Group)
+
+## Loading count data
+in.counts <- "./data/allchip_counts_genes.csv"
+x <- read.table(in.counts, sep="\t", header=TRUE)
+x.annot <- x[,1:6]
+x <- as.matrix(x[,-c(1:6)])
+rownames(x) <- x.annot$Geneid
+colnames(x) <- sapply(strsplit(colnames(x), split="\\."), "[", 1)
+
+## order samples and update sample names
+x <- x[,intersect(colnames(x), rownames(splan))]
+colnames(x) <- as.character(splan[colnames(x), "id"])
+rownames(splan) <- splan$id
+splan <- splan[order(splan$Group),]
+x <- x[,rownames(splan)]
+```
+
+## EGF vs Untreated ChIP comparison
+
+### Naive Fold-change comparison
+
+As a first approach, we can simply generate a scatter-plot of EGF vs untreated ChIP enrichment per gene.
+To do so, we used here the edgeR TMM normalization method, that rescales the gene counts under the assumption that most genes do not vary.
+
+```{r, fcomp}
+##Filter data before FC calculation
+x.f <- x[which(apply(x, 1, function(xx, mc){length(which(xx>=mc))>=1}, mc=10)),]
+message("Filter out ", dim(x)[1]-dim(x.f)[1], " genes")
+    
+y <- DGEList(counts=x.f, group=splan$Group, genes=rownames(x.f))
+y <- calcNormFactors(y, method="TMM")
+design <- model.matrix(~0+splan$Group)
+colnames(design) <- c("EGF", "untreated")
+
+x.norm <- cpm(y, normalized.lib.sizes=TRUE)
+fc <- compareFC(x.norm, x.annot)
+
+```
+
+### Differential analysis
+
+We then further apply the limma voom framework to detect gene with a differential H3K9me2 enrichment.
+
+```{r diffan}
+
+## Run limma
+v <- voom(y, design, plot=TRUE)
+fit <- lmFit(v, design)
+
+contrast <- makeContrasts(EGF-untreated,levels=design)
+fit2 <- contrasts.fit(fit, contrast)
+fit2 <- eBayes(fit2)
+
+res <- topTable(fit2, number=1e6, adjust.method="BH")
+res$sign <- 0
+res$sign[which(res$adj.P.Val < 0.05 & res$logFC > 0.3)] <- 1
+res$sign[which(res$adj.P.Val < 0.05 & res$logFC < -0.3)] <- -1
+
+res <- res[order(res$adj.P.Val),]
+deg <- rownames(res[which(abs(res$sign)==1),])
+up.in.EGF <- rownames(res[which(res$sign==1),])
+down.in.EGF<- rownames(res[which(res$sign==-1),])
+
+hist(res$P.Value, breaks=0:20/20, col="grey50", border="white", 
+     main="Histogram of raw pvalues", xlab="pvalue")
+
+LimmaVolcano(res, fct=0.3, pt=0.05, main=" - Untreated vs EGF")
+write.csv(res, file=file.path("./Diffan_H3K9me2_untreated_vs_EGF_limmavoom.tsv"))
+```
+Using this approach, we identify `r length(up.in.EGF)` genes enriched in H3K9me2 in EGF samples, and `r length(down.in.EGF)` genes less enriched in H3K9me2 in presence of EGF.

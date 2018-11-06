@@ -1,0 +1,6 @@
+A1014C05.R1_dmel-all-chromosome-r6.21_R1_hg38_noDup.bam,Input_untreated_merged.bam,H3K9me2_untreated-1
+A1014C06.R1_dmel-all-chromosome-r6.21_R1_hg38_noDup.bam,Input_EGF_merged.bam,H3K9me2_EGF-1
+A1023C13.R1_dmel-all-chromosome-r6.21_R1_hg38_noDup.bam,Input_untreated_merged.bam,H3K9me2_untreated-2
+A1023C14.R1_dmel-all-chromosome-r6.21_R1_hg38_noDup.bam,Input_EGF_merged.bam,H3K9me2_EGF-2
+A1023C23.R1_dmel-all-chromosome-r6.21_R1_hg38_noDup.bam,Input_untreated_merged.bam,H3K9me2_untreated-3
+A1023C24.R1_dmel-all-chromosome-r6.21_R1_hg38_noDup.bam,Input_EGF_merged.bam,H3K9me2_EGF-3
