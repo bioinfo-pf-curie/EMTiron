@@ -208,8 +208,8 @@ write.csv(res, file.path(outPath, "DEG_untreated_vs_EGF_wo-release.csv"),
 ```
 
 
-`r nsign` DEG were found significant between release and EGF (FDR<5%).
-Among them `r nsignfc` are significant with a FC > 1.
+`r nsign` DEG were found significant between untreated and EGF (FDR<5%).
+Among them `r nsignfc` are significant with a log(FC) > 1.
 
 ```{r volcano2}
 ## VolcanoPlot
